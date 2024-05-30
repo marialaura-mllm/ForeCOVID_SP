@@ -1,0 +1,1437 @@
+---
+output: 
+  pdf_document: 
+    highlight: haddock
+    fig_height: 5
+fontsize: 11pt
+linestretch: 1.5
+---
+
+
+
+\begin{titlepage}
+	
+	\begin{center}
+		
+		\large{FEDERAL UNIVERSITY OF MINAS GERAIS}\\
+        \vspace{2pt}
+		\large{FACULTY OF ECONOMIC SCIENCES}\\
+		    \vspace{2pt}
+		\large{CENTER FOR DEVELOPMENT AND REGIONAL PLANNING}\\
+        \vspace{8cm}
+    
+  \textbf{\huge{Life expectancy forecast in São Paulo city, Brazil, in the context of covid-19}}\\
+      \vspace{25pt}
+    \textbf{\Large{Men}}\\
+        \vspace{6cm}
+		    \Large{Maria Laura Lopes Miranda}\\
+		    \vspace{25pt}
+		
+		\large{June}\\
+		\large{2022}\\
+	
+	\end{center}
+
+\end{titlepage}
+
+
+
+```{r setup, include=FALSE}
+rm(list = ls())
+knitr::opts_chunk$set(echo = F, message = F ,warning = F, fig.align = 'center')
+options(scipen = 999, OutDec = ',', digits = 6)
+
+# Packages
+library(ggplot2)
+library(readxl)
+library(dplyr)
+library(reshape2)
+library(forecast)
+library(fields)
+library(demography)
+library(tidyverse)
+
+```
+
+
+```{r best practice}
+# Life table
+source("LifetableMX.R")
+
+# Best-Practice
+aux_bp_all <- read.csv('bple.csv')[90:269,] # Filter between 1840 and 2019
+reg_f <- lm(e0_Fem~Year, data=aux_bp_all) # Obtain Oeppen-Vaupel curve for Fem
+reg_m <- lm(e0_Masc~Year, data=aux_bp_all) # Obtain Oeppen-Vaupel curve for Mal
+
+```
+
+
+
+\begin{center}
+
+\huge{Lee-Carter(1992)}
+
+\end{center}
+
+
+
+\subsection{Without 2020, 2021, and 2022}
+
+```{r lc.s1}
+
+# Data sets
+E_start <- read_xlsx('exposure_5yeargroup.xlsx')[,-(1:2)] # Exposures
+LMX_start <- read_xlsx('nmx.xlsx')[,-(1:2)] # Death rates
+Y_start <- read_xlsx('deaths.xlsx')[,-(1:2)] # Population
+
+# For each starting point from 1920 to 1995 (76 different combinations)
+# For the forecast period 2023 - 2050 (28 different years)
+# In this case it is also forecasted 2020, 2021 and 2022 but we don't include them
+
+lc_s1 <- c()
+
+# For using in scenarios 5 and 6
+lc_LMX_2023 <- c()
+lc_LMX_2024 <- c()
+  
+for (w in 1:76){
+
+  # Selecting only men and excluding 2020/21/22
+  E <- as.matrix(E_start[1:18,w:(length(E_start)-3)])
+  LMX <- as.matrix(log(LMX_start[1:18,w:(length(LMX_start)-3)]))
+  Y <- as.matrix(Y_start[1:18,w:(length(Y_start)-3)])
+  
+  a <- as.integer(c(0,1,seq(5,80,5))) # Age groups
+  t1 <- as.integer(seq(1919+w,2019,1)) # Baseline period
+  tF <- as.integer(seq(2020,2050,1)) # Forecasted horizon
+  
+  n1 <- length(t1)
+  nF <- length(tF)
+  
+  Alpha <- apply(LMX,1,mean) # Mean until 2019
+  
+  M.tilde <- LMX - Alpha
+  
+  svdM <- svd(M.tilde,nu=1,nv=1)
+  
+  Beta <- c(svdM$u)
+  Kappa1 <- c(svdM$v)
+  
+  sum.Beta <- sum(Beta)
+  Beta <- Beta/sum.Beta
+  
+  Kappa1 <- Kappa1 - mean(Kappa1)
+  Kappa1 <- Kappa1*sum.Beta
+  
+  Kappa <- rep(NA,n1)
+  
+  # Adjusting kt for the deaths
+  koptim <- function(par,Alpha,Beta,sum.dx,Exp){
+    Kappa <- par[1]
+    lmx.lc <- Alpha+Beta*Kappa
+    z.lc <- exp(lmx.lc)*Exp
+    sum.z.lc <- sum(z.lc)
+    diff.lc <- abs(sum.dx-sum.z.lc)
+    return(diff.lc)
+  }
+  
+  for (i in 1:n1){
+    KappaSecStep <- optimize(f=koptim, interval=c(-150,150), Alpha=Alpha,
+                             Beta=Beta, sum.dx=sum(Y[,i]), Exp=E[,i])
+    Kappa[i] <- KappaSecStep$minimum
+  }
+  
+  Kts <- ts(c(Kappa), start = t1[1])
+  
+  modK <- Arima(Kts, order=c(0,1,0), include.drift=TRUE)
+  
+  nS <- 100
+  SIMk <- c()
+  SIMnmx <- c()
+  for(s in 1:nS){
+    s <- 1
+    ## generate simulation with bootsrapping
+    kappa.sim <- simulate(modK, nsim=nF,future=TRUE, bootstrap=TRUE)
+    kappa.matrix <- matrix(kappa.sim)
+    
+    OneF <- rep(1,nF)
+    # Calculate nmx
+    nmx <- Alpha%*%t(OneF) + Beta%*%t(kappa.matrix)
+    # Calculate le by horizon
+    e0 <- apply(exp(nmx),2,e0.mx,x=a,sex="M")
+    
+    SIMk <- rbind(SIMk, e0) # Saving the e0
+    SIMnmx <- rbind(SIMnmx, kappa.sim) # Saving the kappas
+  }
+  
+  # Saving kappas 1 column per forecasted year, one row per sim and starting year
+  lc_s1 <- rbind(lc_s1, SIMk[,4:nF]) # Exclude 2020/21/22 from the horizon
+  
+  ## 2023 and 2024
+  lc_s1_2023 <- as.matrix(SIMnmx[,4])
+  lc_s1_2024 <- as.matrix(SIMnmx[,5])
+  
+  # Taking the mean simulation at each iteration of starting point
+  kappa_2023 <- median(lc_s1_2023)
+  kappa_2024 <- median(lc_s1_2024)
+  
+  # Getting the LMX for each starting point
+  lc_LMX_2023 <- rbind(lc_LMX_2023, 
+                      Alpha + Beta%*%t(kappa_2023))
+  lc_LMX_2024 <- rbind(lc_LMX_2024, 
+                      Alpha + Beta%*%t(kappa_2024))
+  
+}
+
+```
+
+
+
+
+\subsection{With 2020, 2021, and 2022}
+
+
+```{r lc.s2}
+
+# Data sets
+E_start <- read_xlsx('exposure_5yeargroup.xlsx')[,-(1:2)] # Exposures
+LMX_start <- read_xlsx('nmx.xlsx')[,-(1:2)] # Death rates
+Y_start <- read_xlsx('deaths.xlsx')[,-(1:2)] # Population
+
+# For each starting point from 1920 to 1995 (76 different combinations)
+# For the forecast period 2023 - 2050 (28 different years)
+
+lc_s2 <- c()
+
+for (w in 1:76){
+
+  # Selecting only men , data from 1920 to 2022
+  E <- as.matrix(E_start[1:18,w:length(E_start)])
+  LMX <- as.matrix(log(LMX_start[1:18,w:length(LMX_start)]))
+  Y <- as.matrix(Y_start[1:18,w:length(Y_start)])
+  
+  a <- as.integer(c(0,1,seq(5,80,5))) # Age groups
+  t1 <- as.integer(seq(1919+w,2022,1)) # Baseline period
+  tF <- as.integer(seq(2023,2050,1)) # Forecasted horizon
+  
+  n1 <- length(t1)
+  nF <- length(tF)
+  
+  Alpha <- apply(LMX[,1:(ncol(LMX)-3)],1,mean) # Mean until 2019 
+  
+  M.tilde <- LMX - Alpha
+  
+  svdM <- svd(M.tilde,nu=1,nv=1)
+  
+  Beta <- c(svdM$u)
+  Kappa1 <- c(svdM$v)
+  
+  sum.Beta <- sum(Beta)
+  Beta <- Beta/sum.Beta
+  
+  Kappa1 <- Kappa1 - mean(Kappa1)
+  Kappa1 <- Kappa1*sum.Beta
+  
+  Kappa <- rep(NA,n1)
+  
+  # Adjusting kt for the deaths
+  koptim <- function(par,Alpha,Beta,sum.dx,Exp){
+    Kappa <- par[1]
+    lmx.lc <- Alpha+Beta*Kappa
+    z.lc <- exp(lmx.lc)*Exp
+    sum.z.lc <- sum(z.lc)
+    diff.lc <- abs(sum.dx-sum.z.lc)
+    return(diff.lc)
+  }
+  
+  for (i in 1:n1){
+    KappaSecStep <- optimize(f=koptim, interval=c(-150,150), Alpha=Alpha,
+                             Beta=Beta, sum.dx=sum(Y[,i]), Exp=E[,i])
+    Kappa[i] <- KappaSecStep$minimum
+  }
+  
+  Kts <- ts(c(Kappa), start = t1[1])
+  
+  modK <- Arima(Kts, order=c(0,1,0), include.drift=TRUE)
+  
+  nS <- 100
+  SIMk <- c()
+  for(s in 1:nS){
+    s <- 1
+    ## generate simulation with bootsrapping
+    kappa.sim <- simulate(modK, nsim=nF,future=TRUE, bootstrap=TRUE)
+    kappa.matrix <- matrix(kappa.sim)
+    
+    OneF <- rep(1,nF)
+    # Calculate nmx
+    nmx <- Alpha%*%t(OneF) + Beta%*%t(kappa.matrix)
+    # Calculate le by horizon
+    e0 <- apply(exp(nmx),2,e0.mx,x=a,sex="M")
+    
+    SIMk <- rbind(SIMk, e0) # Saving the e0
+  }
+  
+  # Saving kappas 1 column per forecasted year, one row per sim and starting year
+  lc_s2 <- rbind(lc_s2, SIMk)
+
+}
+```
+
+
+
+
+\subsection{With 2020, 2021, 2022, and 2023 == 2019}
+
+```{r lc.s3}
+
+# Data sets
+E_start <- read_xlsx('exposure_5yeargroup.xlsx')[,-(1:2)] # Exposures
+LMX_start <- read_xlsx('nmx.xlsx')[,-(1:2)] # Death rates
+Y_start <- read_xlsx('deaths.xlsx')[,-(1:2)] # Population
+
+# 2023 == 2019
+E_start$'2023' <- c(E_start$'2019')
+LMX_start$'2023' <- c(LMX_start$'2019')
+Y_start$'2023' <- c(Y_start$'2019')
+
+# For each starting point from 1920 to 1995 (76 different combinations)
+# For the forecast period 2024 - 2050 (27 different years)
+
+lc_s3 <- c()
+
+for (w in 1:76){
+
+  # Selecting only men, data from 1920 to 2023
+  E <- as.matrix(E_start[1:18,w:length(E_start)])
+  LMX <- as.matrix(log(LMX_start[1:18,w:length(LMX_start)]))
+  Y <- as.matrix(Y_start[1:18,w:length(Y_start)])
+  
+  a <- as.integer(c(0,1,seq(5,80,5))) # Age groups
+  t1 <- as.integer(seq(1919+w,2023,1)) # Baseline period
+  tF <- as.integer(seq(2024,2050,1)) # Forecasted horizon
+  
+  n1 <- length(t1)
+  nF <- length(tF)
+  
+  Alpha <- apply(LMX[,1:(ncol(LMX)-4)],1,mean) # Mean until 2019
+  
+  M.tilde <- LMX - Alpha
+  
+  svdM <- svd(M.tilde,nu=1,nv=1)
+  
+  Beta <- c(svdM$u)
+  Kappa1 <- c(svdM$v)
+  
+  sum.Beta <- sum(Beta)
+  Beta <- Beta/sum.Beta
+  
+  Kappa1 <- Kappa1 - mean(Kappa1)
+  Kappa1 <- Kappa1*sum.Beta
+  
+  Kappa <- rep(NA,n1)
+  
+  # Adjusting kt for the deaths
+  koptim <- function(par,Alpha,Beta,sum.dx,Exp){
+    Kappa <- par[1]
+    lmx.lc <- Alpha+Beta*Kappa
+    z.lc <- exp(lmx.lc)*Exp
+    sum.z.lc <- sum(z.lc)
+    diff.lc <- abs(sum.dx-sum.z.lc)
+    return(diff.lc)
+  }
+  
+  for (i in 1:n1){
+    KappaSecStep <- optimize(f=koptim, interval=c(-150,150), Alpha=Alpha,
+                             Beta=Beta, sum.dx=sum(Y[,i]), Exp=E[,i])
+    Kappa[i] <- KappaSecStep$minimum
+  }
+  
+  Kts <- ts(c(Kappa), start = t1[1])
+  
+  modK <- Arima(Kts, order=c(0,1,0), include.drift=TRUE)
+  
+  nS <- 100
+  SIMk <- c()
+  for(s in 1:nS){
+    s <- 1
+    ## generate simulation with bootsrapping
+    kappa.sim <- simulate(modK, nsim=nF,future=TRUE, bootstrap=TRUE)
+    kappa.matrix <- matrix(kappa.sim)
+    
+    OneF <- rep(1,nF)
+    # Calculate nmx
+    nmx <- Alpha%*%t(OneF) + Beta%*%t(kappa.matrix)
+    # Calculate le by horizon
+    e0 <- apply(exp(nmx),2,e0.mx,x=a,sex="M")
+    
+    SIMk <- rbind(SIMk, e0) # Saving the e0
+  }
+  
+  # Saving kappas 1 column per forecasted year, one row per sim and starting year
+  lc_s3 <- rbind(lc_s3, cbind(NA, SIMk)) # NA for the year 2023
+
+}
+
+```
+
+
+
+
+\subsection{With 2020, 2021, 2022, and 2023 == 2023 from 1st approach}
+
+
+```{r lc.s4}
+
+# Data sets
+E_start <- read_xlsx('exposure_5yeargroup.xlsx')[,-(1:2)] # Exposures
+LMX_start <- read_xlsx('nmx.xlsx')[,-(1:2)] # Death rates
+Y_start <- read_xlsx('deaths.xlsx')[,-(1:2)] # Population
+
+# For each starting point from 1920 to 1995 (76 different combinations)
+# For the forecast period 2024 - 2050 (27 different years)
+
+lc_s4 <- c()
+
+for (w in 1:76){
+
+  # 2023 == pop interpolated for both men and women
+  aux_pop <- c(61307,239866,344865,335745,364462,419659,430038,428515,450675,
+               448576,377244,348645,310696,269849,213364,154532,95977,106656,
+               59508,231481,332120,322157,347892,415220,439690,451424,496303,
+               510045,441217,411083,383356,353289,295993,229175,155581,213611) 
+  
+  # Taking the estimates from s1 per iteration
+  aux_nmx <- exp(c(lc_LMX_2023[((w*18)-17):(w*18),], rep(1,18)))
+  aux_deaths <- aux_pop*aux_nmx
+  
+  E_start$'2023' <- c(aux_pop)
+  LMX_start$'2023' <- c(aux_nmx)
+  Y_start$'2023' <- c(aux_deaths)
+  
+  # Selecting only men, data from 1920 to 2023
+  E <- as.matrix(E_start[1:18,w:length(E_start)])
+  LMX <- as.matrix(log(LMX_start[1:18,w:length(LMX_start)]))
+  Y <- as.matrix(Y_start[1:18,w:length(Y_start)])
+  
+  a <- as.integer(c(0,1,seq(5,80,5))) # Age groups
+  t1 <- as.integer(seq(1919+w,2023,1)) # Baseline period
+  tF <- as.integer(seq(2024,2050,1)) # Forecasted horizon
+  
+  n1 <- length(t1)
+  nF <- length(tF)
+  
+  Alpha <- apply(LMX[,1:(ncol(LMX)-4)],1,mean) # Mean until 2019
+  
+  M.tilde <- LMX - Alpha
+  
+  svdM <- svd(M.tilde,nu=1,nv=1)
+  
+  Beta <- c(svdM$u)
+  Kappa1 <- c(svdM$v)
+  
+  sum.Beta <- sum(Beta)
+  Beta <- Beta/sum.Beta
+  
+  Kappa1 <- Kappa1 - mean(Kappa1)
+  Kappa1 <- Kappa1*sum.Beta
+  
+  Kappa <- rep(NA,n1)
+  
+  # Adjusting kt for the deaths
+  koptim <- function(par,Alpha,Beta,sum.dx,Exp){
+    Kappa <- par[1]
+    lmx.lc <- Alpha+Beta*Kappa
+    z.lc <- exp(lmx.lc)*Exp
+    sum.z.lc <- sum(z.lc)
+    diff.lc <- abs(sum.dx-sum.z.lc)
+    return(diff.lc)
+  }
+  
+  for (i in 1:n1){
+    KappaSecStep <- optimize(f=koptim, interval=c(-150,150), Alpha=Alpha,
+                             Beta=Beta, sum.dx=sum(Y[,i]), Exp=E[,i])
+    Kappa[i] <- KappaSecStep$minimum
+  }
+  
+  Kts <- ts(c(Kappa), start = t1[1])
+  
+  modK <- Arima(Kts, order=c(0,1,0), include.drift=TRUE)
+  
+  nS <- 100
+  SIMk <- c()
+  for(s in 1:nS){
+    s <- 1
+    ## generate simulation with bootsrapping
+    kappa.sim <- simulate(modK, nsim=nF,future=TRUE, bootstrap=TRUE)
+    kappa.matrix <- matrix(kappa.sim)
+    
+    OneF <- rep(1,nF)
+    # Calculate nmx
+    nmx <- Alpha%*%t(OneF) + Beta%*%t(kappa.matrix)
+    # Calculate le by horizon
+    e0 <- apply(exp(nmx),2,e0.mx,x=a,sex="M")
+    
+    SIMk <- rbind(SIMk, e0) # Saving the e0
+  }
+  
+  # Saving kappas 1 column per forecasted year, one row per sim and starting year
+  lc_s4 <- rbind(lc_s4, cbind(NA, SIMk)) # NA for the year 2023
+
+}
+
+```
+
+
+
+
+
+\subsection{With 2020, 2021, 2022, 2023 == mean(2022,2024, and 2024 == 2019}
+
+```{r lc.s5}
+
+# Data sets
+E_start <- read_xlsx('exposure_5yeargroup.xlsx')[,-(1:2)] # Exposures
+LMX_start <- read_xlsx('nmx.xlsx')[,-(1:2)] # Death rates
+Y_start <- read_xlsx('deaths.xlsx')[,-(1:2)] # Population
+
+# 2023 = mean (2022, 2024==2019)
+E_start$'2023' <- rowMeans(cbind(E_start$'2022', E_start$'2019'))
+LMX_start$'2023' <- rowMeans(cbind(LMX_start$'2022', LMX_start$'2019'))
+Y_start$'2023' <- rowMeans(cbind(Y_start$'2022', Y_start$'2019'))
+
+# 2024 == 2019
+E_start$'2024' <- c(E_start$'2019')
+LMX_start$'2024' <- c(LMX_start$'2019')
+Y_start$'2024' <- c(Y_start$'2019')
+
+# For each starting point from 1920 to 1995 (76 different combinations)
+# For the forecast period 2025 - 2050 (26 different years)
+
+lc_s5 <- c()
+
+for (w in 1:76){
+
+  # Selecting only men, data from 1920 to 2023
+  E <- as.matrix(E_start[1:18,w:length(E_start)])
+  LMX <- as.matrix(log(LMX_start[1:18,w:length(LMX_start)]))
+  Y <- as.matrix(Y_start[1:18,w:length(Y_start)])
+  
+  a <- as.integer(c(0,1,seq(5,80,5))) # Age groups
+  t1 <- as.integer(seq(1919+w,2024,1)) # Baseline period
+  tF <- as.integer(seq(2025,2050,1)) # Forecasted horizon
+  
+  n1 <- length(t1)
+  nF <- length(tF)
+  
+  Alpha <- apply(LMX[,1:(ncol(LMX)-5)],1,mean) # Mean until 2019
+  
+  M.tilde <- LMX - Alpha
+  
+  svdM <- svd(M.tilde,nu=1,nv=1)
+  
+  Beta <- c(svdM$u)
+  Kappa1 <- c(svdM$v)
+  
+  sum.Beta <- sum(Beta)
+  Beta <- Beta/sum.Beta
+  
+  Kappa1 <- Kappa1 - mean(Kappa1)
+  Kappa1 <- Kappa1*sum.Beta
+  
+  Kappa <- rep(NA,n1)
+  
+  # Adjusting kt for the deaths
+  koptim <- function(par,Alpha,Beta,sum.dx,Exp){
+    Kappa <- par[1]
+    lmx.lc <- Alpha+Beta*Kappa
+    z.lc <- exp(lmx.lc)*Exp
+    sum.z.lc <- sum(z.lc)
+    diff.lc <- abs(sum.dx-sum.z.lc)
+    return(diff.lc)
+  }
+  
+  for (i in 1:n1){
+    KappaSecStep <- optimize(f=koptim, interval=c(-150,150), Alpha=Alpha,
+                             Beta=Beta, sum.dx=sum(Y[,i]), Exp=E[,i])
+    Kappa[i] <- KappaSecStep$minimum
+  }
+  
+  Kts <- ts(c(Kappa), start = t1[1])
+  
+  modK <- Arima(Kts, order=c(0,1,0), include.drift=TRUE)
+  
+  nS <- 100
+  SIMk <- c()
+  for(s in 1:nS){
+    s <- 1
+    ## generate simulation with bootsrapping
+    kappa.sim <- simulate(modK, nsim=nF,future=TRUE, bootstrap=TRUE)
+    kappa.matrix <- matrix(kappa.sim)
+    
+    OneF <- rep(1,nF)
+    # Calculate nmx
+    nmx <- Alpha%*%t(OneF) + Beta%*%t(kappa.matrix)
+    # Calculate le by horizon
+    e0 <- apply(exp(nmx),2,e0.mx,x=a,sex="M")
+    
+    SIMk <- rbind(SIMk, e0) # Saving the e0
+  }
+  
+  # Saving kappas 1 column per forecasted year, one row per sim and starting year
+  lc_s5 <- rbind(lc_s5, cbind(NA, NA, SIMk)) # NA for the years 2023/2024
+
+}
+
+```
+
+
+
+
+\subsection{With 2020, 2021, 2022, 2023 == 2019, and 2024 == 2024 from 1st approach}
+
+
+```{r lc.s6}
+
+# Data sets
+E_start <- read_xlsx('exposure_5yeargroup.xlsx')[,-(1:2)] # Exposures
+LMX_start <- read_xlsx('nmx.xlsx')[,-(1:2)] # Death rates
+Y_start <- read_xlsx('deaths.xlsx')[,-(1:2)] # Population
+
+# For each starting point from 1920 to 1995 (76 different combinations)
+# For the forecast period 2025 - 2050 (26 different years)
+
+lc_s6 <- c()
+
+for (w in 1:76){
+
+  # 2024 == pop interpolated for both men and women
+  aux_pop <- c(60438,236467,341870,328906,360489,414672,423799,424694,452902,
+               453881,380135,352523,316615,277903,222212,160419,98961,110709,
+               58672,228227,329210,315071,342781,409158,431822,445929,498793,
+               517072,444482,414790,390324,364001,308002,238295,160062,220764)  
+  
+  # Taking the estimates from s1 per iteration
+  aux_nmx <- exp(c(lc_LMX_2024[((w*18)-17):(w*18),], rep(1,18)))
+  aux_deaths <- aux_pop*aux_nmx
+  
+  # 2023 == mean (2022, 2024)
+  E_start$'2023' <- rowMeans(cbind(E_start$'2022', aux_pop))
+  LMX_start$'2023' <- rowMeans(cbind(LMX_start$'2022', aux_nmx))
+  Y_start$'2023' <- rowMeans(cbind(Y_start$'2022', aux_deaths))
+  
+  E_start$'2024' <- c(aux_pop)
+  LMX_start$'2024' <- c(aux_nmx)
+  Y_start$'2024' <- c(aux_deaths)
+  
+  # Selecting only men, data from 1920 to 2024
+  E <- as.matrix(E_start[1:18,w:length(E_start)])
+  LMX <- as.matrix(log(LMX_start[1:18,w:length(LMX_start)]))
+  Y <- as.matrix(Y_start[1:18,w:length(Y_start)])
+  
+  a <- as.integer(c(0,1,seq(5,80,5))) # Age groups
+  t1 <- as.integer(seq(1919+w,2024,1)) # Baseline period
+  tF <- as.integer(seq(2025,2050,1)) # Forecasted horizon
+  
+  n1 <- length(t1)
+  nF <- length(tF)
+  
+  Alpha <- apply(LMX[,1:(ncol(LMX)-5)],1,mean) # Mean until 2019
+  
+  M.tilde <- LMX - Alpha
+  
+  svdM <- svd(M.tilde,nu=1,nv=1)
+  
+  Beta <- c(svdM$u)
+  Kappa1 <- c(svdM$v)
+  
+  sum.Beta <- sum(Beta)
+  Beta <- Beta/sum.Beta
+  
+  Kappa1 <- Kappa1 - mean(Kappa1)
+  Kappa1 <- Kappa1*sum.Beta
+  
+  Kappa <- rep(NA,n1)
+  
+  # Adjusting kt for the deaths
+  koptim <- function(par,Alpha,Beta,sum.dx,Exp){
+    Kappa <- par[1]
+    lmx.lc <- Alpha+Beta*Kappa
+    z.lc <- exp(lmx.lc)*Exp
+    sum.z.lc <- sum(z.lc)
+    diff.lc <- abs(sum.dx-sum.z.lc)
+    return(diff.lc)
+  }
+  
+  for (i in 1:n1){
+    KappaSecStep <- optimize(f=koptim, interval=c(-150,150), Alpha=Alpha,
+                             Beta=Beta, sum.dx=sum(Y[,i]), Exp=E[,i])
+    Kappa[i] <- KappaSecStep$minimum
+  }
+  
+  Kts <- ts(c(Kappa), start = t1[1])
+  
+  modK <- Arima(Kts, order=c(0,1,0), include.drift=TRUE)
+  
+  nS <- 100
+  SIMk <- c()
+  for(s in 1:nS){
+    s <- 1
+    ## generate simulation with bootsrapping
+    kappa.sim <- simulate(modK, nsim=nF,future=TRUE, bootstrap=TRUE)
+    kappa.matrix <- matrix(kappa.sim)
+    
+    OneF <- rep(1,nF)
+    # Calculate nmx
+    nmx <- Alpha%*%t(OneF) + Beta%*%t(kappa.matrix)
+    # Calculate le by horizon
+    e0 <- apply(exp(nmx),2,e0.mx,x=a,sex="M")
+    
+    SIMk <- rbind(SIMk, e0) # Saving the e0
+  }
+  
+  # Saving kappas 1 column per forecasted year, one row per sim and starting year
+  lc_s6 <- rbind(lc_s6, cbind(NA, NA, SIMk)) # NA for the years 2023/2024
+
+}
+
+```
+
+
+
+
+
+\newpage
+\begin{center}
+
+\huge{Lee-Miller(2001)}
+
+\end{center}
+
+
+
+\subsection{Without 2020, 2021, and 2022}
+
+```{r lm.s1}
+
+# Data sets
+E_start <- read_xlsx('exposure_5yeargroup.xlsx')[,-(1:2)] # Exposures
+LMX_start <- read_xlsx('nmx.xlsx')[,-(1:2)] # Death rates
+Y_start <- read_xlsx('deaths.xlsx')[,-(1:2)] # Population
+
+# For each starting point from 1950 to 1995 (46 different combinations)
+# For the forecast period 2023 - 2050 (28 different years)
+# In this case it is also forecasted 2020, 2021, and 2022 but we don't include them
+
+lm_s1 <- c()
+
+# For using in scenarios 5 and 6
+lm_LMX_2023 <- c()
+lm_LMX_2024 <- c()
+
+for (w in 31:76){
+
+  # Selecting only men and excluding 2020/21/22
+  E <- as.matrix(E_start[1:18,w:(length(E_start)-3)])
+  LMX <- as.matrix(log(LMX_start[1:18,w:(length(LMX_start)-3)]))
+  Y <- as.matrix(Y_start[1:18,w:(length(Y_start)-3)])
+  
+  a <- as.integer(c(0,1,seq(5,80,5))) # Age groups
+  t1 <- as.integer(seq(1919+w,2019,1)) # Baseline period
+  tF <- as.integer(seq(2020,2050,1)) # Forecasted horizon
+  
+  n1 <- length(t1)
+  nF <- length(tF)
+  
+  Alpha <- LMX[,ncol(LMX)] #### Instead of mean use the year of 2019
+  
+  M.tilde <- LMX - Alpha
+  
+  svdM <- svd(M.tilde,nu=1,nv=1)
+  
+  Beta <- c(svdM$u)
+  Kappa1 <- c(svdM$v)
+  
+  sum.Beta <- sum(Beta)
+  Beta <- Beta/sum.Beta
+  
+  Kappa1 <- Kappa1 - mean(Kappa1)
+  Kappa1 <- Kappa1*sum.Beta
+  
+  Kappa <- rep(NA,n1)
+  
+  e0.obs.real <- apply(exp(LMX),2,e0.mx,x=a,sex="M")
+  
+  # Adjusting kt for the e0
+  koptim <- function(par,Alpha,Beta,e0.obs,x,sex){
+    Kappa <- par[1]
+    lmx.lc <- Alpha+Beta*Kappa
+    e0.est <- e0.mx(mx=exp(lmx.lc),x=a,sex="M") #e0 adjustment
+    diff.lc <- abs(e0.obs-e0.est)
+    return(diff.lc)
+  }
+  
+  for (i in 1:n1){
+    KappaSecStep <- optimize(f=koptim, interval=c(-150,150), Alpha=Alpha, 
+                             Beta=Beta, e0.obs=e0.obs.real[i], x=a, sex="M")
+    Kappa[i] <- KappaSecStep$minimum
+  }
+  
+  Kts <- ts(c(Kappa), start = t1[1])
+  
+  modK <- Arima(Kts, order=c(0,1,0), include.drift=TRUE)
+  
+  nS <- 100
+  SIMk <- c()
+  SIMnmx <- c()
+  for(s in 1:nS){
+    s <- 1
+    ## generate simulation with bootsrapping
+    kappa.sim <- simulate(modK, nsim=nF,future=TRUE, bootstrap=TRUE)
+    kappa.matrix <- matrix(kappa.sim)
+    
+    OneF <- rep(1,nF)
+    # Calculate nmx
+    nmx <- Alpha%*%t(OneF) + Beta%*%t(kappa.matrix)
+    # Calculate le by horizon
+    e0 <- apply(exp(nmx),2,e0.mx,x=a,sex="M")
+    
+    SIMk <- rbind(SIMk, e0) # Saving the e0
+    SIMnmx <- rbind(SIMnmx, kappa.sim) # Saving the kappas
+  }
+  
+  # Saving kappas 1 column per forecasted year, one row per sim and starting year
+  lm_s1 <- rbind(lm_s1, SIMk[,4:nF]) # Excluding 2020/21/22
+  
+  ## 2023 and 2024
+  lm_s1_2023 <- as.matrix(SIMnmx[,4])
+  lm_s1_2024 <- as.matrix(SIMnmx[,5])
+  
+  # Taking the mean simulation at each iteration of starting point
+  kappa_2023 <- median(lm_s1_2023)
+  kappa_2024 <- median(lm_s1_2024)
+  
+  # Getting the LMX for each starting point
+  lm_LMX_2023 <- rbind(lm_LMX_2023, 
+                      Alpha + Beta%*%t(kappa_2023))
+  lm_LMX_2024 <- rbind(lm_LMX_2024, 
+                      Alpha + Beta%*%t(kappa_2024))
+  
+}
+
+```
+
+
+
+
+\subsection{With 2020, 2021, and 2022}
+
+```{r lm.s2}
+# Data sets
+E_start <- read_xlsx('exposure_5yeargroup.xlsx')[,-(1:2)] # Exposures
+LMX_start <- read_xlsx('nmx.xlsx')[,-(1:2)] # Death rates
+Y_start <- read_xlsx('deaths.xlsx')[,-(1:2)] # Population
+
+# For each starting point from 1950 to 1995 (46 different combinations)
+# For the forecast period 2023 - 2050 (28 different years)
+
+lm_s2 <- c()
+
+for (w in 31:76){
+
+  # Selecting only men, data from 1920 to 2021
+  E <- as.matrix(E_start[1:18,w:length(E_start)])
+  LMX <- as.matrix(log(LMX_start[1:18,w:length(LMX_start)]))
+  Y <- as.matrix(Y_start[1:18,w:length(Y_start)])
+  
+  a <- as.integer(c(0,1,seq(5,80,5))) # Age groups
+  t1 <- as.integer(seq(1919+w,2022,1)) # Baseline period
+  tF <- as.integer(seq(2023,2050,1)) # Forecasted horizon
+  
+  n1 <- length(t1)
+  nF <- length(tF)
+  
+  Alpha <- LMX[,ncol(LMX)-3] #### Instead of mean use the year of 2019
+  
+  M.tilde <- LMX - Alpha
+  
+  svdM <- svd(M.tilde,nu=1,nv=1)
+  
+  Beta <- c(svdM$u)
+  Kappa1 <- c(svdM$v)
+  
+  sum.Beta <- sum(Beta)
+  Beta <- Beta/sum.Beta
+  
+  Kappa1 <- Kappa1 - mean(Kappa1)
+  Kappa1 <- Kappa1*sum.Beta
+  
+  Kappa <- rep(NA,n1)
+  
+  e0.obs.real <- apply(exp(LMX),2,e0.mx,x=a,sex="M")
+  
+  # Adjusting kt for the e0
+  koptim <- function(par,Alpha,Beta,e0.obs,x,sex){
+    Kappa <- par[1]
+    lmx.lc <- Alpha+Beta*Kappa
+    e0.est <- e0.mx(mx=exp(lmx.lc),x=a,sex="M") #e0 adjustment
+    diff.lc <- abs(e0.obs-e0.est)
+    return(diff.lc)
+  }
+  
+  for (i in 1:n1){
+    KappaSecStep <- optimize(f=koptim, interval=c(-150,150), Alpha=Alpha,
+                             Beta=Beta, e0.obs=e0.obs.real[i], x=a, sex="M")
+    Kappa[i] <- KappaSecStep$minimum
+  }
+  
+  Kts <- ts(c(Kappa), start = t1[1])
+  
+  modK <- Arima(Kts, order=c(0,1,0), include.drift=TRUE)
+
+  nS <- 100
+  SIMk <- c()
+  for(s in 1:nS){
+    s <- 1
+    ## generate simulation with bootsrapping
+    kappa.sim <- simulate(modK, nsim=nF,future=TRUE, bootstrap=TRUE)
+    kappa.matrix <- matrix(kappa.sim)
+    
+    OneF <- rep(1,nF)
+    # Calculate nmx
+    nmx <- Alpha%*%t(OneF) + Beta%*%t(kappa.matrix)
+    # Calculate le by horizon
+    e0 <- apply(exp(nmx),2,e0.mx,x=a,sex="M")
+    
+    SIMk <- rbind(SIMk, e0) # Saving the e0
+  }
+  
+  # Saving kappas 1 column per forecasted year, one row per sim and starting year
+  lm_s2 <- rbind(lm_s2, SIMk)
+
+}
+
+```
+
+
+
+
+\subsection{With 2020, 2021, 2022, and 2023 == 2019}
+
+```{r lm.s3}
+
+# Data sets
+E_start <- read_xlsx('exposure_5yeargroup.xlsx')[,-(1:2)] # Exposures
+LMX_start <- read_xlsx('nmx.xlsx')[,-(1:2)] # Death rates
+Y_start <- read_xlsx('deaths.xlsx')[,-(1:2)] # Population
+
+# 2023 == 2019
+E_start$'2023' <- c(E_start$'2019')
+LMX_start$'2023' <- c(LMX_start$'2019')
+Y_start$'2023' <- c(Y_start$'2019')
+
+# For each starting point from 1950 to 1995 (46 different combinations)
+# For the forecast period 2024 - 2050 (27 different years)
+
+lm_s3 <- c()
+
+for (w in 31:76){
+
+  # Selecting only men, data from 1920 to 2023
+  E <- as.matrix(E_start[1:18,w:length(E_start)])
+  LMX <- as.matrix(log(LMX_start[1:18,w:length(LMX_start)]))
+  Y <- as.matrix(Y_start[1:18,w:length(Y_start)])
+  
+  a <- as.integer(c(0,1,seq(5,80,5))) # Age groups
+  t1 <- as.integer(seq(1919+w,2023,1)) # Baseline period
+  tF <- as.integer(seq(2024,2050,1)) # Forecasted horizon
+  
+  n1 <- length(t1)
+  nF <- length(tF)
+  
+  Alpha <- LMX[,ncol(LMX)-4] #### Instead of mean use the year of 2019
+  
+  M.tilde <- LMX - Alpha
+  
+  svdM <- svd(M.tilde,nu=1,nv=1)
+  
+  Beta <- c(svdM$u)
+  Kappa1 <- c(svdM$v)
+  
+  sum.Beta <- sum(Beta)
+  Beta <- Beta/sum.Beta
+  
+  Kappa1 <- Kappa1 - mean(Kappa1)
+  Kappa1 <- Kappa1*sum.Beta
+  
+  Kappa <- rep(NA,n1)
+  
+  e0.obs.real <- apply(exp(LMX),2,e0.mx,x=a,sex="M")
+  
+  # Adjusting kt for the e0
+  koptim <- function(par,Alpha,Beta,e0.obs,x,sex){
+    Kappa <- par[1]
+    lmx.lc <- Alpha+Beta*Kappa
+    e0.est <- e0.mx(mx=exp(lmx.lc),x=a,sex="M") #e0 adjustment
+    diff.lc <- abs(e0.obs-e0.est)
+    return(diff.lc)
+  }
+  
+  for (i in 1:n1){
+    KappaSecStep <- optimize(f=koptim, interval=c(-150,150), Alpha=Alpha,
+                             Beta=Beta, e0.obs=e0.obs.real[i], x=a, sex="M")
+    Kappa[i] <- KappaSecStep$minimum
+  }
+  
+  Kts <- ts(c(Kappa), start = t1[1])
+  
+  modK <- Arima(Kts, order=c(0,1,0), include.drift=TRUE)
+
+  nS <- 100
+  SIMk <- c()
+  for(s in 1:nS){
+    s <- 1
+    ## generate simulation with bootsrapping
+    kappa.sim <- simulate(modK, nsim=nF,future=TRUE, bootstrap=TRUE)
+    kappa.matrix <- matrix(kappa.sim)
+    
+    OneF <- rep(1,nF)
+    # Calculate nmx
+    nmx <- Alpha%*%t(OneF) + Beta%*%t(kappa.matrix)
+    # Calculate le by horizon
+    e0 <- apply(exp(nmx),2,e0.mx,x=a,sex="M")
+    
+    SIMk <- rbind(SIMk, e0) # Saving the e0
+  }
+  
+  # Saving kappas 1 column per forecasted year, one row per sim and starting year
+  lm_s3 <- rbind(lm_s3, cbind(NA, SIMk)) # NA for the year 2023
+
+}
+
+```
+
+
+
+
+\subsection{With 2020, 2021, 2022, and 2023 == 2023 from 1st approach}
+
+```{r lm.s4}
+
+# Data sets
+E_start <- read_xlsx('exposure_5yeargroup.xlsx')[,-(1:2)] # Exposures
+LMX_start <- read_xlsx('nmx.xlsx')[,-(1:2)] # Death rates
+Y_start <- read_xlsx('deaths.xlsx')[,-(1:2)] # Population
+
+# For each starting point from 1950 to 1995 (46 different combinations)
+# For the forecast period 2024 - 2050 (27 different years)
+
+lm_s4 <- c()
+
+for (w in 31:76){
+  
+  # 2023 == pop interpolated for both men and women
+  aux_pop <- c(61307,239866,344865,335745,364462,419659,430038,428515,450675,
+               448576,377244,348645,310696,269849,213364,154532,95977,106656,
+               59508,231481,332120,322157,347892,415220,439690,451424,496303,
+               510045,441217,411083,383356,353289,295993,229175,155581,213611)
+  
+  # Taking the estimates from s1 per iteration
+  aux_nmx <- exp(c(lm_LMX_2023[(((w-30)*18)-17):((w-30)*18),], rep(1,18)))
+  aux_deaths <- aux_pop*aux_nmx
+  
+  E_start$'2023' <- c(aux_pop)
+  LMX_start$'2023' <- c(aux_nmx)
+  Y_start$'2023' <- c(aux_deaths)
+  
+  # Selecting only men, data from 1920 to 2023
+  E <- as.matrix(E_start[1:18,w:length(E_start)])
+  LMX <- as.matrix(log(LMX_start[1:18,w:length(LMX_start)]))
+  Y <- as.matrix(Y_start[1:18,w:length(Y_start)])
+  
+  a <- as.integer(c(0,1,seq(5,80,5)))
+  t1 <- as.integer(seq(1919+w,2023,1))
+  tF <- as.integer(seq(2024,2050,1))
+  
+  n1 <- length(t1)
+  nF <- length(tF)
+  
+  Alpha <- LMX[,ncol(LMX)-4] #### Instead of mean use the year of 2019
+  
+  M.tilde <- LMX - Alpha
+  
+  svdM <- svd(M.tilde,nu=1,nv=1)
+  
+  Beta <- c(svdM$u)
+  Kappa1 <- c(svdM$v)
+  
+  sum.Beta <- sum(Beta)
+  Beta <- Beta/sum.Beta
+  
+  Kappa1 <- Kappa1 - mean(Kappa1)
+  Kappa1 <- Kappa1*sum.Beta
+  
+  Kappa <- rep(NA,n1)
+  
+  e0.obs.real <- apply(exp(LMX),2,e0.mx,x=a,sex="M")
+  
+  # Adjusting kt for the e0
+  koptim <- function(par,Alpha,Beta,e0.obs,x,sex){
+    Kappa <- par[1]
+    lmx.lc <- Alpha+Beta*Kappa
+    e0.est <- e0.mx(mx=exp(lmx.lc),x=a,sex="M") #e0 adjustment
+    diff.lc <- abs(e0.obs-e0.est)
+    return(diff.lc)
+  }
+  
+  for (i in 1:n1){
+    KappaSecStep <- optimize(f=koptim, interval=c(-150,150), Alpha=Alpha,
+                             Beta=Beta, e0.obs=e0.obs.real[i], x=a, sex="M")
+    Kappa[i] <- KappaSecStep$minimum
+  }
+  
+  Kts <- ts(c(Kappa), start = t1[1])
+  
+  modK <- Arima(Kts, order=c(0,1,0), include.drift=TRUE)
+
+  nS <- 100
+  SIMk <- c()
+  for(s in 1:nS){
+    s <- 1
+    ## generate simulation with bootsrapping
+    kappa.sim <- simulate(modK, nsim=nF,future=TRUE, bootstrap=TRUE)
+    kappa.matrix <- matrix(kappa.sim)
+    
+    OneF <- rep(1,nF)
+    # Calculate nmx
+    nmx <- Alpha%*%t(OneF) + Beta%*%t(kappa.matrix)
+    # Calculate le by horizon
+    e0 <- apply(exp(nmx),2,e0.mx,x=a,sex="M")
+    
+    SIMk <- rbind(SIMk, e0) # Saving the e0
+  }
+  
+  # Saving kappas 1 column per forecasted year, one row per sim and starting year
+  lm_s4 <- rbind(lm_s4, cbind(NA, SIMk)) # NA for the year 2023
+
+}
+
+```
+
+
+
+
+\subsection{With 2020, 2021, 2022, 2023 == mean(2022, 2024), and 2024 == 2019}
+
+```{r lm.s5}
+
+# Data sets
+E_start <- read_xlsx('exposure_5yeargroup.xlsx')[,-(1:2)] # Exposures
+LMX_start <- read_xlsx('nmx.xlsx')[,-(1:2)] # Death rates
+Y_start <- read_xlsx('deaths.xlsx')[,-(1:2)] # Population
+
+# 2023 = mean (2022, 2024==2019)
+E_start$'2023' <- rowMeans(cbind(E_start$'2022', E_start$'2019'))
+LMX_start$'2023' <- rowMeans(cbind(LMX_start$'2022', LMX_start$'2019'))
+Y_start$'2023' <- rowMeans(cbind(Y_start$'2022', Y_start$'2019'))
+
+# 2024 == 2019
+E_start$'2024' <- c(E_start$'2019')
+LMX_start$'2024' <- c(LMX_start$'2019')
+Y_start$'2024' <- c(Y_start$'2019')
+
+# For each starting point from 1950 to 1995 (46 different combinations)
+# For the forecast period 2025 - 2050 (26 different years)
+
+lm_s5 <- c()
+
+for (w in 31:76){
+
+  # Selecting only men, data from 1920 to 2024
+  E <- as.matrix(E_start[1:18,w:length(E_start)])
+  LMX <- as.matrix(log(LMX_start[1:18,w:length(LMX_start)]))
+  Y <- as.matrix(Y_start[1:18,w:length(Y_start)])
+  
+  a <- as.integer(c(0,1,seq(5,80,5))) # Age groups
+  t1 <- as.integer(seq(1919+w,2024,1)) # Baseline period
+  tF <- as.integer(seq(2025,2050,1)) # Forecasted horizon
+  
+  n1 <- length(t1)
+  nF <- length(tF)
+  
+  Alpha <- LMX[,ncol(LMX)-5] #### Instead of mean use the year of 2019
+  
+  M.tilde <- LMX - Alpha
+  
+  svdM <- svd(M.tilde,nu=1,nv=1)
+  
+  Beta <- c(svdM$u)
+  Kappa1 <- c(svdM$v)
+  
+  sum.Beta <- sum(Beta)
+  Beta <- Beta/sum.Beta
+  
+  Kappa1 <- Kappa1 - mean(Kappa1)
+  Kappa1 <- Kappa1*sum.Beta
+  
+  Kappa <- rep(NA,n1)
+  
+  e0.obs.real <- apply(exp(LMX),2,e0.mx,x=a,sex="M")
+  
+  # Adjusting kt for the e0
+  koptim <- function(par,Alpha,Beta,e0.obs,x,sex){
+    Kappa <- par[1]
+    lmx.lc <- Alpha+Beta*Kappa
+    e0.est <- e0.mx(mx=exp(lmx.lc),x=a,sex="M") #e0 adjustment
+    diff.lc <- abs(e0.obs-e0.est)
+    return(diff.lc)
+  }
+  
+  for (i in 1:n1){
+    KappaSecStep <- optimize(f=koptim, interval=c(-150,150), Alpha=Alpha,
+                             Beta=Beta, e0.obs=e0.obs.real[i], x=a, sex="M")
+    Kappa[i] <- KappaSecStep$minimum
+  }
+  
+  Kts <- ts(c(Kappa), start = t1[1])
+  
+  modK <- Arima(Kts, order=c(0,1,0), include.drift=TRUE)
+
+  nS <- 100
+  SIMk <- c()
+  for(s in 1:nS){
+    s <- 1
+    ## generate simulation with bootsrapping
+    kappa.sim <- simulate(modK, nsim=nF,future=TRUE, bootstrap=TRUE)
+    kappa.matrix <- matrix(kappa.sim)
+    
+    OneF <- rep(1,nF)
+    # Calculate nmx
+    nmx <- Alpha%*%t(OneF) + Beta%*%t(kappa.matrix)
+    # Calculate le by horizon
+    e0 <- apply(exp(nmx),2,e0.mx,x=a,sex="M")
+    
+    SIMk <- rbind(SIMk, e0) # Saving the e0
+  }
+  
+  # Saving kappas 1 column per forecasted year, one row per sim and starting year
+  lm_s5 <- rbind(lm_s5, cbind(NA, NA, SIMk)) # NA for the year 2023/2024
+
+}
+
+```
+
+
+
+
+\subsection{With 2020, 2021, 2022, 2023 == mean(2022, 2024), and 2024 == 2024 from 1st approach}
+
+```{r lm.s6}
+
+# Data sets
+E_start <- read_xlsx('exposure_5yeargroup.xlsx')[,-(1:2)] # Exposures
+LMX_start <- read_xlsx('nmx.xlsx')[,-(1:2)] # Death rates
+Y_start <- read_xlsx('deaths.xlsx')[,-(1:2)] # Population
+
+# For each starting point from 1950 to 1995 (46 different combinations)
+# For the forecast period 2023 - 2050 (28 different years)
+
+lm_s6 <- c()
+
+for (w in 31:76){
+  
+  # 2024 == pop interpolated for both men and women
+  aux_pop <- c(60438,236467,341870,328906,360489,414672,423799,424694,452902,
+               453881,380135,352523,316615,277903,222212,160419,98961,110709,
+               58672,228227,329210,315071,342781,409158,431822,445929,498793,
+               517072,444482,414790,390324,364001,308002,238295,160062,220764) 
+  
+  # Taking the estimates from s1 per iteration
+  aux_nmx <- exp(c(lm_LMX_2024[(((w-30)*18)-17):((w-30)*18),], rep(1,18)))
+  aux_deaths <- aux_pop*aux_nmx
+  
+  # 2023 == mean (2022, 2024)
+  E_start$'2023' <- rowMeans(cbind(E_start$'2022', aux_pop))
+  LMX_start$'2023' <- rowMeans(cbind(LMX_start$'2022', aux_nmx))
+  Y_start$'2023' <- rowMeans(cbind(Y_start$'2022', aux_deaths))
+  
+  E_start$'2024' <- c(aux_pop)
+  LMX_start$'2024' <- c(aux_nmx)
+  Y_start$'2024' <- c(aux_deaths)
+  
+  # Selecting only men, data from 1920 to 2024
+  E <- as.matrix(E_start[1:18,w:length(E_start)])
+  LMX <- as.matrix(log(LMX_start[1:18,w:length(LMX_start)]))
+  Y <- as.matrix(Y_start[1:18,w:length(Y_start)])
+  
+  a <- as.integer(c(0,1,seq(5,80,5)))
+  t1 <- as.integer(seq(1919+w,2024,1))
+  tF <- as.integer(seq(2025,2050,1))
+  
+  n1 <- length(t1)
+  nF <- length(tF)
+  
+  Alpha <- LMX[,ncol(LMX)-5] #### Instead of mean use the year of 2019
+  
+  M.tilde <- LMX - Alpha
+  
+  svdM <- svd(M.tilde,nu=1,nv=1)
+  
+  Beta <- c(svdM$u)
+  Kappa1 <- c(svdM$v)
+  
+  sum.Beta <- sum(Beta)
+  Beta <- Beta/sum.Beta
+  
+  Kappa1 <- Kappa1 - mean(Kappa1)
+  Kappa1 <- Kappa1*sum.Beta
+  
+  Kappa <- rep(NA,n1)
+  
+  e0.obs.real <- apply(exp(LMX),2,e0.mx,x=a,sex="M")
+  
+  # Adjusting kt for the e0
+  koptim <- function(par,Alpha,Beta,e0.obs,x,sex){
+    Kappa <- par[1]
+    lmx.lc <- Alpha+Beta*Kappa
+    e0.est <- e0.mx(mx=exp(lmx.lc),x=a,sex="M") #e0 adjustment
+    diff.lc <- abs(e0.obs-e0.est)
+    return(diff.lc)
+  }
+  
+  for (i in 1:n1){
+    KappaSecStep <- optimize(f=koptim, interval=c(-150,150), Alpha=Alpha,
+                             Beta=Beta, e0.obs=e0.obs.real[i], x=a, sex="M")
+    Kappa[i] <- KappaSecStep$minimum
+  }
+  
+  Kts <- ts(c(Kappa), start = t1[1])
+  
+  modK <- Arima(Kts, order=c(0,1,0), include.drift=TRUE)
+
+  nS <- 100
+  SIMk <- c()
+  for(s in 1:nS){
+    s <- 1
+    ## generate simulation with bootsrapping
+    kappa.sim <- simulate(modK, nsim=nF,future=TRUE, bootstrap=TRUE)
+    kappa.matrix <- matrix(kappa.sim)
+    
+    OneF <- rep(1,nF)
+    # Calculate nmx
+    nmx <- Alpha%*%t(OneF) + Beta%*%t(kappa.matrix)
+    # Calculate le by horizon
+    e0 <- apply(exp(nmx),2,e0.mx,x=a,sex="M")
+    
+    SIMk <- rbind(SIMk, e0) # Saving the e0
+  }
+  
+  # Saving kappas 1 column per forecasted year, one row per sim and starting year
+  lm_s6 <- rbind(lm_s6, cbind(NA, NA, SIMk)) # NA for the years 2023/2024
+
+}
+
+```
+
+
+
+
+\newpage
+\begin{center}
+
+\huge{Summary}
+
+\Large{Lee-Carter(1992) and Lee-Miller(2001)}
+
+\end{center}
+
+
+```{r summary}
+
+comb <- rbind(lc_s1, lc_s2, lc_s3, lc_s4, lc_s5, lc_s6,
+              lm_s1, lm_s2, lm_s3, lm_s4, lm_s5, lm_s6)
+
+colnames(comb) <- seq(2023, 2050)
+
+## define PI level
+lev <- 95
+lev.p <- lev/100
+
+# Conf interval for kappas
+e0.low <- apply(comb,2,quantile,prob=(1-lev.p)/2, na.rm=T)
+e0.upp <- apply(comb,2,quantile,prob=1-(1-lev.p)/2, na.rm=T)
+e0.med <- apply(comb,2,median, na.rm=T)
+e0.max <- apply(comb,2,max, na.rm=T)
+e0.min <- apply(comb,2,min, na.rm=T)
+
+
+aux <- data.frame(year = seq(2023, 2050),
+                  e0.med,
+                  e0.low,
+                  e0.upp)
+
+aux2 <- data.frame(year = seq(2023, 2050),
+                  round(e0.med,2),
+                  round(e0.low,2),
+                  round(e0.upp,2))
+
+
+write.table(aux2, 'summary_male.txt')
+
+# Getting estimates for 1920-2022
+LMX_start <- read_xlsx('nmx.xlsx') # Death rates
+LMX <- as.matrix(log(LMX_start[1:18,3:length(LMX_start)]))
+
+aux_obs <- data.frame(year = seq(1920, 2022),
+                      e0.med = apply(exp(LMX),2,e0.mx,x=a,sex="M"))
+  
+
+reg_m <- lm(e0_Masc~Year, data=aux_bp_all) # Obtain Oeppen-Vaupel curve for Male
+
+# Plotting the results
+ggplot()+
+  geom_point(data = aux_obs,
+             aes(x = year, y = e0.med, color = "Observed"), lwd = 1)+
+  geom_line(data = aux, 
+             aes(x = year, y = e0.med, 
+                 color = "Median estimate"), lwd = 1)+
+  #geom_line(data = aux, 
+  #           aes(x = year, y = e0.low,
+  #               color = "Forecasted considering all scenarios"), 
+  #          linetype = "dashed", lwd = 1, show.legend = F)+
+  #geom_line(data = aux, 
+  #           aes(x = year, y = e0.upp,
+  #               color = "Forecasted considering all scenarios"), 
+  #          linetype = "dashed", lwd = 1, show.legend = F)+
+  geom_ribbon(data = aux, 
+             aes(x = year, y = e0.upp,ymin=e0.low, ymax=e0.upp, fill = "95% PI"), alpha=0.2)+
+  # Best-Practice
+  geom_abline(aes(intercept = reg_m$coefficients[1], slope = reg_m$coefficients[2],
+                  color="Best-Practice"), lwd = 1, show.legend = F)+
+  theme_minimal()+
+  scale_color_manual(values = c("Observed"="grey40",
+                                "Median estimate"="orange",
+                                "Best-Practice"="steelblue3"))+
+  scale_fill_manual("",values="grey12")+
+  labs(x="Year", y=""~"e"[0]~"", color = '')+
+  theme(legend.position = "bottom",
+        text = element_text(size = 15),
+        axis.title.x = element_text(vjust = -1),
+        axis.line = element_line(colour = "grey30"))+
+  scale_x_continuous(breaks = scales::pretty_breaks(n = 15))+
+  scale_y_continuous(limits = c(35, 97.5), n.breaks = 15)
+
+ggsave(path = "plots/",filename = "figure_fore_male.pdf", width = 9, height = 5)
+ggsave(path = "plots/",filename = "figure_fore_male.png", width = 9, height = 5)
+
+```
+
+
+
+
+
+
+
+
+
+
+

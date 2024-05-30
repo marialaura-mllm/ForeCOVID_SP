@@ -1,0 +1,287 @@
+---
+output: 
+  pdf_document: 
+    highlight: haddock
+    fig_height: 4
+fontsize: 11pt
+linestretch: 1.5
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = F, message = F ,warning = F)
+options(scipen = 999, OutDec = ',', digits = 6)
+
+# Packages
+library(ggplot2)
+library(readxl)
+library(dplyr)
+library(reshape2)
+library(gridExtra)
+library(tidyverse)
+library(lemon)
+
+```
+
+
+
+
+```{r functions}
+
+# Life table functions
+source("LifetableMX.R")
+
+# Age vector
+a <- as.integer(c(0,1,seq(5,80,5)))
+
+```
+
+
+
+\section{Descriptive Analysis}
+
+
+\subsection{log(nmx)}
+
+```{r log nmx}
+
+# Data manipulation
+aux <- read_xlsx('nmx.xlsx')
+aux[,3:length(aux)] <- log(aux[,3:length(aux)])
+
+nmx <- 
+aux %>% 
+  pivot_longer(-c(age, sex), values_to = 'log_nmx', names_to = 'year') %>% 
+  mutate(year = as.numeric(year),
+         sex = case_when(sex == 'Masc' ~ 'Males',
+                         sex == 'Fem' ~ 'Females'),
+         log_nmx2 = log_nmx)
+
+## Figure 1
+# Plot
+nmx %>% 
+  ggplot(aes(x = age, y=log_nmx, group = year, color = year))+
+  geom_line(data = subset(nmx, year <= 2019), lwd=0.3)+
+  geom_line(data = subset(nmx, year == "2020"), color = "chocolate1", lwd=1)+
+  geom_line(data = subset(nmx, year == "2021"), color = "firebrick3", lwd=1)+
+  geom_line(data = subset(nmx, year == "2022"), color = "darkgoldenrod1", lwd=1)+
+  facet_rep_grid(~sex)+
+  theme_classic()+
+  labs(x="Age",y="log("[n]~"m"[x]~")",color="Year", fill = '')+
+  theme(legend.position = "bottom",
+        text = element_text(size = 15),
+        axis.title.x = element_text(vjust = -1),
+        axis.line = element_line(colour = "grey70"),
+        panel.spacing = unit(1.5, "lines"),
+        strip.background = element_rect(colour = "white", fill = "white"),
+        panel.grid.major = element_line(color = "grey85",size = 0.1), 
+        panel.grid.minor = element_blank(),
+        legend.key.width = unit(1.5,"cm"),
+        plot.margin = unit(c(0.2, 0.2, 0.2, 0.2), 
+                           "inches"))+
+  scale_x_continuous(breaks = scales::pretty_breaks(n = 10), expand=c(0, 0))+
+  scale_fill_manual(values = c("2020" = "chocolate1",
+                               "2021" = "firebrick3",
+                               "2022" = "darkgoldenrod1"))+
+  
+  ylim(c(-10, 0))+
+  
+  geom_point(aes(x = 10, y = 100, fill = "2020"), color = "chocolate1")+ 
+  geom_point(aes(x = 0, y = -100, fill = "2021"), color = "firebrick3")+
+  geom_point(aes(x = 0, y = -100, fill = "2022"), color = "darkgoldenrod1")
+  
+ggsave(path = "plots/",filename = "nmx.pdf", width = 11, height = 6)
+ggsave(path = "plots/",filename = "nmx.png", width = 11, height = 6)
+
+```
+
+
+\subsection{Life expectancy}
+
+```{r e0}
+
+LMX <- read_xlsx('nmx.xlsx')
+LMX_men <- as.matrix(log(LMX[1:18,3:length(LMX)]))
+LMX_wom <- as.matrix(log(LMX[19:36,3:length(LMX)]))
+
+## computing life expectancy
+e0.obs.m <- apply(exp(LMX_men),2,e0.mx,x=a,sex="M")
+e0.obs.w <- apply(exp(LMX_wom),2,e0.mx,x=a,sex="F")
+
+# Data manipulation
+aux <- data.frame(sex = c(rep("Masc", 103),rep("Fem", 103)), 
+                  year = rep(seq(1920,2022,1),2),
+                  e_value = c(e0.obs.m, e0.obs.w))
+
+aux$e_label <- c(aux$e_value[1], rep(NA,49), aux$e_value[51], rep(NA,48),
+                 aux$e_value[100], NA, aux$e_value[102], aux$e_value[103],
+                 aux$e_value[104], rep(NA,49), aux$e_value[154], rep(NA,48), 
+                 aux$e_value[203], NA, aux$e_value[205], aux$e_value[206])
+
+# Adding Best-Practice to same dataset
+aux <- 
+aux %>% mutate(sex = case_when(sex == 'Masc' ~ 'Males',
+                               sex == 'Fem' ~ 'Females')) %>% 
+  full_join(read.csv('bple.csv')[90:269,] %>% 
+              select(year=Year, Males=e0_Masc, Females=e0_Fem) %>% 
+              pivot_longer(-year, names_to = "sex", values_to = "e_value_bp"),
+            by = c("year", "sex")) %>% 
+  arrange(year, sex) 
+
+## Figure 2
+# Plot
+aux %>% 
+  ggplot(aes(x = year, label=round(e_label, 1), color = sex))+
+  # Sao Paulo line
+  geom_line(lwd=1, aes(y=e_value, linetype = "São Paulo"))+
+  geom_line(lwd=1, aes(y=-10, linetype = "Best-Practice"))+ # Just for legend
+  
+  
+  # Best Practice
+  geom_smooth(aes(y = e_value_bp, linetype = "Best-Practice"), show.legend = F,
+              method = "lm", se = FALSE, na.rm = TRUE, fullrange = TRUE)+
+  
+  facet_rep_grid(~sex)+
+  # Data labels
+  geom_point(lwd = 0.5, show.legend = F, aes(y=round(e_label,1)),
+             color = "black")+
+  geom_text(hjust = -0.2, size =3.5, angle=35, aes(y=e_value),
+            show.legend = F, color = "black")+
+  
+  # Extra changes
+  scale_linetype_manual(values = c("Best-Practice"="solid", "São Paulo"="twodash"))+
+  scale_color_manual("Sex", 
+                     values = c("Males"="steelblue3", "Females"="firebrick2"))+
+  theme_classic()+
+  labs(x="Year", y=""~"e"[0]~"", linetype='')+
+  
+  theme(legend.position = "bottom",
+        text = element_text(size = 15),
+        axis.title.x = element_text(vjust = -1),
+        axis.line = element_line(colour = "grey70"),
+        panel.spacing = unit(1.5, "lines"),
+        strip.background = element_rect(colour = "white", fill = "white"),
+        panel.grid.major = element_line(color = "grey85",size = 0.1), 
+        panel.grid.minor = element_blank(),
+        plot.margin = unit(c(0.2, 0.2, 0.2, 0.2), 
+                           "inches"))+
+  
+  scale_x_continuous(breaks = scales::pretty_breaks(n = 10), 
+                     limits = c(1918, 2029), expand=c(0, 0))+
+  scale_y_continuous(breaks = scales::pretty_breaks(n = 10),
+                     limits = c(36,92), expand=c(0, 0))
+
+
+ggsave(path = "plots/",filename = "le.pdf", width = 11, height = 6)
+ggsave(path = "plots/",filename = "le.png", width = 11, height = 6)
+
+```
+
+
+
+\section{Forecasts}
+
+```{r}
+
+# Getting forecasts 2023-2050
+e0_fore <- 
+read.table('summary_female.txt') %>% 
+  as.data.frame() %>% 
+  mutate(sex = "Females") %>% 
+  full_join(read.table('summary_male.txt') %>%
+              as.data.frame() %>% 
+              mutate(sex = "Males")) %>%
+  select(year, sex, e0 = round.e0.med..2.,
+         e0_low = round.e0.low..2., e0_up = round.e0.upp..2.) %>% 
+  mutate(type = "Median Estimate")
+  
+
+# Getting estimates for 1920-2022
+LMX <- read_xlsx('nmx.xlsx') # Death rates
+LMX_male <- as.matrix(log(LMX[1:18,3:length(LMX)]))
+LMX_female <- as.matrix(log(LMX[19:36,3:length(LMX)]))
+
+e0_obs <- data.frame(year = rep(seq(1920, 2022), 2),
+                     sex = c(rep("Males", length(seq(1920, 2022))), 
+                             rep("Females", length(seq(1920, 2022)))),
+                     e0 = c(apply(exp(LMX_male),2,e0.mx,x=a,sex="M"),
+                            apply(exp(LMX_female),2,e0.mx,x=a,sex="F")),
+                     type = "Observed")
+
+# Getting BP and aggregating estimates 
+aux <- 
+e0_fore %>% 
+  full_join(e0_obs) %>% 
+  full_join(read.csv('bple.csv')[90:269,] %>% 
+              select(year=Year, Males=e0_Masc, Females=e0_Fem) %>% 
+              pivot_longer(-year, names_to = "sex", values_to = "e0") %>% 
+              mutate(type = "Best-Practice")) %>% 
+  arrange(year, sex)
+
+
+## Figure 3
+# Plot
+aux %>% 
+  ggplot(aes(x = year, y = e0, color = sex))+
+  geom_vline(xintercept=2023, linetype="dashed", size=1, alpha=0.5)+
+  
+  # Observed
+  geom_line(data = subset(aux, type == "Observed"), lwd = 0.8)+
+  #geom_point(aes(x = 10, y = 100, linetype = "Observed"))+ # Just for legend
+  
+  # Best Practice
+  geom_smooth(data = subset(aux, type == "Best-Practice"), show.legend = F,
+              method = "lm", se = FALSE, na.rm = TRUE, fullrange = TRUE, lwd=1,
+              aes(linetype = "Best-Practice"))+
+  geom_line(lwd=1, aes(y=-10, linetype = "Best-Practice"))+ # Just for legend
+  
+  # Forecasts
+  geom_line(data = subset(aux, type == "Median Estimate"), linetype = "twodash",
+            aes(size = "Median Estimate"), color = "orange", lwd = 1.3)+
+  
+  # 95% PI
+  geom_ribbon(data = subset(aux, type == "Median Estimate"), color = "grey85",
+             aes(ymin=e0_low, ymax=e0_up, fill = "95% PI"), alpha=0.2)+
+  
+  
+  facet_rep_grid(~sex)+
+  
+  
+  # Extra changes
+  scale_linetype_manual(values = c("Best-Practice"="solid", "São Paulo"="twodash"))+
+  scale_color_manual("Sex", 
+                     values = c("Males"="steelblue3", 
+                                "Females"="firebrick2"))+
+  
+  scale_fill_manual("",values=c("95% PI"="grey12"))+
+  theme_classic()+
+  labs(x="Year", y=""~"e"[0]~"", linetype='', shape='', size='')+
+  
+  theme(legend.position = "bottom",
+        text = element_text(size = 15),
+        axis.title.x = element_text(vjust = -1),
+        axis.line = element_line(colour = "grey70"),
+        panel.spacing = unit(1.5, "lines"),
+        strip.background = element_rect(colour = "white", fill = "white"),
+        panel.grid.major = element_line(color = "grey85",size = 0.1), 
+        panel.grid.minor = element_blank(),
+        plot.margin = unit(c(0.2, 0.2, 0.2, 0.2), 
+                           "inches"))+
+  
+  guides(linetype = guide_legend(order = 1),
+         shape = guide_legend(order = 2),
+         size = guide_legend(order = 4),
+         fill = guide_legend(order = 5),
+         color = guide_legend(order = 3))+
+  
+  scale_x_continuous(breaks = scales::pretty_breaks(n = 8), 
+                     limits = c(1920, 2050), expand=c(0, 0))+
+  scale_y_continuous(breaks = scales::pretty_breaks(n = 10),
+                     limits = c(36,100), expand=c(0, 0))
+
+
+ggsave(path = "plots/",filename = "fore.pdf", width = 11, height = 6)
+ggsave(path = "plots/",filename = "fore.png", width = 11, height = 6)
+
+```
+
