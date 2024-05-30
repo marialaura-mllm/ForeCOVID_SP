@@ -10,3 +10,4 @@ Miranda, M., Turra, C. Basellini, U. Forecasting Life Expectancy in São Paulo C
 - _fun_ : functions
 - _out_ : output figures
 - _src_ : code to replicate analysis and visualisation
+- _dat_ : additional data
